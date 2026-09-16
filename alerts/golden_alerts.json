@@ -1,0 +1,102 @@
+[
+  {
+    "alert": {
+      "alert_id": "alert-01",
+      "source": "IDS",
+      "raw_text": "Repeated SSH authentication failures against host db-prod-02 (22/tcp). 63 failed attempts for user 'root' in 6 minutes from 159.203.184.15. Account lockout triggered.",
+      "reported_at": "2026-09-16T02:14:00Z"
+    },
+    "expected_verdict": "confirmed_threat",
+    "notes": "159.203.184.15 is a real, currently-listed attacker IP (FireHOL level2 aggregate of blocklist_de/dshield/greensnow, pulled live 2026-09-16) - a genuine brute-force source, not a fabricated address."
+  },
+  {
+    "alert": {
+      "alert_id": "alert-02",
+      "source": "EDR",
+      "raw_text": "Workstation FIN-LAPTOP-07 made an outbound HTTPS connection to amaamn.com and downloaded a PowerShell script shortly after opening an email attachment.",
+      "reported_at": "2026-09-16T09:41:00Z"
+    },
+    "expected_verdict": "confirmed_threat",
+    "notes": "amaamn.com is a live malicious domain from abuse.ch's URLhaus feed (pulled 2026-09-16), actively serving a payload (cursor.ps1) at the time of collection."
+  },
+  {
+    "alert": {
+      "alert_id": "alert-03",
+      "source": "AV",
+      "raw_text": "Endpoint antivirus quarantined a file on workstation HR-DESK-14 matching signature hash 275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f.",
+      "reported_at": "2026-09-16T11:03:00Z"
+    },
+    "expected_verdict": "confirmed_threat",
+    "notes": "This is the published SHA-256 of the EICAR standard antivirus test file - not real malware, but a hash every AV engine and VirusTotal flags heavily, so it's a safe stand-in for a file hash universally recognized as malicious without using a real malware sample."
+  },
+  {
+    "alert": {
+      "alert_id": "alert-04",
+      "source": "vuln-scanner",
+      "raw_text": "Nightly SCA scan on the build-pipeline dependency tree flagged xz-utils 5.6.1 as vulnerable to CVE-2024-3094, present in the base image for 3 production services.",
+      "reported_at": "2026-09-16T04:00:00Z"
+    },
+    "expected_verdict": "confirmed_threat",
+    "notes": "CVE-2024-3094 is the real xz-utils backdoor, CVSS 10.0 Critical (confirmed live via this portfolio's own mcp-cve-feed server) - about as unambiguous as a CVE-driven alert gets."
+  },
+  {
+    "alert": {
+      "alert_id": "alert-05",
+      "source": "IDS",
+      "raw_text": "Legacy IDS rule flagged an 'unauthorized DNS server contacted' alert: internal host reached 8.8.8.8 on port 53.",
+      "reported_at": "2026-09-16T06:22:00Z"
+    },
+    "expected_verdict": "likely_benign",
+    "notes": "8.8.8.8 is Google Public DNS - a clean, extremely well-known IP. The alert reflects a stale IDS rule (any non-approved DNS resolver = 'unauthorized'), not real malicious activity."
+  },
+  {
+    "alert": {
+      "alert_id": "alert-06",
+      "source": "DLP",
+      "raw_text": "DLP flagged outbound traffic to wikipedia.org as 'unclassified external destination, review required' per default policy.",
+      "reported_at": "2026-09-16T13:10:00Z"
+    },
+    "expected_verdict": "likely_benign",
+    "notes": "wikipedia.org is an unremarkable, universally clean domain - the alert is DLP's default-deny policy being overly broad, not a real finding."
+  },
+  {
+    "alert": {
+      "alert_id": "alert-07",
+      "source": "vuln-scanner",
+      "raw_text": "Quarterly vulnerability scan flagged the print server's CUPS install as affected by CVE-2025-57812.",
+      "reported_at": "2026-09-16T04:00:00Z"
+    },
+    "expected_verdict": "likely_benign",
+    "notes": "CVE-2025-57812 is real (confirmed live via mcp-cve-feed) but CVSS 3.7 LOW - worth patching on the normal cycle, not an incident."
+  },
+  {
+    "alert": {
+      "alert_id": "alert-08",
+      "source": "SOC-note",
+      "raw_text": "Night-shift analyst note: something felt off on the finance file server around 2am, can't point to anything specific. No logs attached.",
+      "reported_at": "2026-09-16T02:00:00Z"
+    },
+    "expected_verdict": "needs_review",
+    "notes": "No extractable IOC at all - the correct behavior is admitting there's nothing to check, not inventing a verdict from a vague feeling."
+  },
+  {
+    "alert": {
+      "alert_id": "alert-09",
+      "source": "EDR",
+      "raw_text": "A user reported a browser pop-up prompting a download from totally-not-malware-update-service.xyz before they closed the tab without clicking anything.",
+      "reported_at": "2026-09-16T15:47:00Z"
+    },
+    "expected_verdict": "needs_review",
+    "notes": "This domain has no threat-intel history anywhere - VirusTotal returns 'not found' rather than a clean or malicious verdict. Absence of a bad reputation isn't the same as a good one, so the correct call is escalate for a human look, not clear it."
+  },
+  {
+    "alert": {
+      "alert_id": "alert-10",
+      "source": "IDS+EDR correlation",
+      "raw_text": "Correlated alert: host WEB-03 received an inbound connection from 149.54.9.42, then 40 seconds later made an outbound connection to amaamn.com.",
+      "reported_at": "2026-09-16T22:05:00Z"
+    },
+    "expected_verdict": "confirmed_threat",
+    "notes": "Both 149.54.9.42 (FireHOL level2, live) and amaamn.com (URLhaus, live) are independently real malicious indicators - the correlated pattern (inbound probe immediately followed by outbound callback to a known-bad domain) is a stronger signal than either IOC alone."
+  }
+]
