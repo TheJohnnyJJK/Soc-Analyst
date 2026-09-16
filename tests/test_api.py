@@ -64,6 +64,15 @@ def test_create_alert_honors_a_supplied_alert_id(client):
     assert resp.json()["alert"]["alert_id"] == "custom-01"
 
 
+def test_create_alert_is_idempotent_on_a_repeated_alert_id(client):
+    """A red-team pass found that with no uniqueness check, an ordinary
+    webhook retry silently duplicated the audit trail."""
+    first = _post_alert(client, alert_id="retry-01").json()
+    second = _post_alert(client, alert_id="retry-01").json()
+    assert first["id"] == second["id"]
+    assert len(client.get("/alerts").json()) == 1
+
+
 def test_get_alert_by_id(client):
     created = _post_alert(client).json()
     resp = client.get(f"/alerts/{created['id']}")
@@ -168,3 +177,24 @@ def test_auth_required_when_soc_api_key_is_set(client, monkeypatch):
         headers={"X-API-Key": "secret"},
     )
     assert resp.status_code == 200
+
+
+def test_docs_are_open_by_default(client):
+    """Local-dev default (no SOC_API_KEY): docs/schema stay reachable,
+    same as every other route."""
+    assert client.get("/docs").status_code == 200
+    assert client.get("/redoc").status_code == 200
+    assert client.get("/openapi.json").status_code == 200
+
+
+def test_docs_require_auth_when_soc_api_key_is_set(client, monkeypatch):
+    """A red-team pass found /docs and /openapi.json stayed public even
+    with auth enabled everywhere else - these three routes must track
+    the same on/off switch as /alerts."""
+    monkeypatch.setenv("SOC_API_KEY", "secret")
+    assert client.get("/docs").status_code == 401
+    assert client.get("/redoc").status_code == 401
+    assert client.get("/openapi.json").status_code == 401
+
+    assert client.get("/docs", headers={"X-API-Key": "secret"}).status_code == 200
+    assert client.get("/openapi.json", headers={"X-API-Key": "secret"}).status_code == 200

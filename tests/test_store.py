@@ -106,6 +106,24 @@ def test_recent_sightings_respects_the_time_window():
     assert hits == []
 
 
+def test_insert_triage_is_idempotent_on_alert_id():
+    first_id = store.insert_triage(_alert("a-01"), _result("a-01"))
+    second_id = store.insert_triage(_alert("a-01"), _result("a-01"))
+    assert first_id == second_id
+    assert len(store.list_records()) == 1
+
+
+def test_get_record_by_alert_id():
+    store.insert_triage(_alert("a-01"), _result("a-01"))
+    record = store.get_record_by_alert_id("a-01")
+    assert record is not None
+    assert record.alert.alert_id == "a-01"
+
+
+def test_get_record_by_alert_id_returns_none_when_missing():
+    assert store.get_record_by_alert_id("no-such-alert") is None
+
+
 def test_reset_db_clears_all_records(monkeypatch, tmp_path):
     store.insert_triage(_alert(), _result())
     assert store.list_records() != []

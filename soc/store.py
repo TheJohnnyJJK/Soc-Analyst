@@ -31,7 +31,7 @@ DB_PATH = os.environ.get("SOC_STORE_DB", _DEFAULT_DB_PATH)
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS triage_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    alert_id TEXT NOT NULL,
+    alert_id TEXT NOT NULL UNIQUE,
     source TEXT NOT NULL,
     raw_text TEXT NOT NULL,
     reported_at TEXT,
@@ -89,34 +89,64 @@ def reset_db() -> None:
 
 
 def insert_triage(alert: Alert, result: TriageResult) -> int:
-    """Records one triage() call and its evidence, returns the new row's
-    id. Called from soc/api.py after triage() returns - never called
+    """Records one triage() call and its evidence, returns the row's id.
+    Called from soc/api.py after triage() returns - never called
     directly by the eval harness, which stays a pure in-memory grading
-    run with no persistence side effect."""
+    run with no persistence side effect.
+
+    Idempotent on alert_id: a red-team pass found that with no
+    uniqueness check, an ordinary at-least-once-delivery webhook retry
+    silently created a second row for the same alert - duplicating the
+    audit trail and double-counting it as an "independent" correlation
+    sighting. Retried with the same alert_id, this returns the existing
+    record instead of writing a duplicate.
+    """
+    existing = get_record_by_alert_id(alert.alert_id)
+    if existing is not None:
+        return existing.id
     created_at = datetime.datetime.utcnow().isoformat()
     with _conn() as conn:
-        cur = conn.execute(
-            """INSERT INTO triage_records
-               (alert_id, source, raw_text, reported_at, verdict, confidence,
-                reasoning, correlation, evidence_json, scorer, latency_ms,
-                status, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
-            (
-                alert.alert_id, alert.source, alert.raw_text, alert.reported_at,
-                result.verdict, result.confidence, result.reasoning, result.correlation,
-                json.dumps([e.model_dump() for e in result.evidence]),
-                result.scorer, result.latency_ms, created_at,
-            ),
-        )
-        record_id = cur.lastrowid
-        for e in result.evidence:
-            conn.execute(
-                """INSERT INTO ioc_sightings
-                   (record_id, alert_id, ioc_type, value, verdict, created_at)
-                   VALUES (?,?,?,?,?,?)""",
-                (record_id, alert.alert_id, e.ioc_type, e.value, e.verdict, created_at),
+        try:
+            cur = conn.execute(
+                """INSERT INTO triage_records
+                   (alert_id, source, raw_text, reported_at, verdict, confidence,
+                    reasoning, correlation, evidence_json, scorer, latency_ms,
+                    status, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
+                (
+                    alert.alert_id, alert.source, alert.raw_text, alert.reported_at,
+                    result.verdict, result.confidence, result.reasoning, result.correlation,
+                    json.dumps([e.model_dump() for e in result.evidence]),
+                    result.scorer, result.latency_ms, created_at,
+                ),
             )
-    return record_id
+        except sqlite3.IntegrityError:
+            # Lost a race with a concurrent identical request between
+            # the check above and this insert - the other request's
+            # row is the one that counts, not an error.
+            pass
+        else:
+            record_id = cur.lastrowid
+            for e in result.evidence:
+                conn.execute(
+                    """INSERT INTO ioc_sightings
+                       (record_id, alert_id, ioc_type, value, verdict, created_at)
+                       VALUES (?,?,?,?,?,?)""",
+                    (record_id, alert.alert_id, e.ioc_type, e.value, e.verdict, created_at),
+                )
+            return record_id
+    winner = get_record_by_alert_id(alert.alert_id)
+    if winner is None:  # pragma: no cover - the IntegrityError above proves a row exists
+        raise RuntimeError(f"lost the insert race for alert_id={alert.alert_id!r} but found no row")
+    return winner.id
+
+
+def get_record_by_alert_id(alert_id: str) -> StoredTriageRecord | None:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM triage_records WHERE alert_id = ?", (alert_id,)
+        ).fetchone()
+    return _row_to_record(row) if row else None
 
 
 def recent_sightings(

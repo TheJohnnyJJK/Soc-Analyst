@@ -53,3 +53,29 @@ def test_extracts_multiple_iocs_of_different_types_together():
     assert result["ip"] == ["149.54.9.42"]
     assert result["domain"] == ["amaamn.com"]
     assert result["cve"] == ["CVE-2024-3094"]
+
+
+def test_extracts_a_bracket_defanged_ip():
+    result = extract_iocs("connection from 159[.]203[.]184[.]15")
+    assert result["ip"] == ["159.203.184.15"]
+
+
+def test_extracts_an_hxxp_defanged_domain():
+    result = extract_iocs("beaconed to hxxp://amaamn[.]com/payload")
+    assert result["domain"] == ["amaamn.com"]
+
+
+def test_extracts_a_domain_split_by_zero_width_characters():
+    result = extract_iocs("beaconed to amaamn​.com")
+    assert result["domain"] == ["amaamn.com"]
+
+
+def test_common_file_extensions_are_not_mistaken_for_domains():
+    result = extract_iocs("attached invoice.pdf, setup.exe, and readme.txt")
+    assert result["domain"] == []
+
+
+def test_iocs_of_one_type_are_capped_per_alert():
+    text = " ".join(f"1.2.3.{i}" for i in range(1, 50))
+    result = extract_iocs(text)
+    assert len(result["ip"]) == 15

@@ -200,6 +200,66 @@ a clear error. Fixed in `soc/api.py` - `MissingApiKeyError` now returns
 503 with the actual problem named, and a threat-intel HTTP failure
 returns 502 instead of an opaque crash.
 
+**A dedicated red-team pass** (same instinct as agent-red-team elsewhere
+in this portfolio, applied here) actually tried to break this project
+rather than just review it, and found real, verified problems - all
+fixed, each with a regression test, before this was called done:
+
+- **Defanged notation was invisible.** `159[.]203[.]184[.]15`,
+  `hxxp://amaamn[.]com` - the standard way analysts write IOCs in
+  prose *specifically so they're not clickable/pingable* - extracted
+  to zero IOCs. This isn't even adversarial, it's normal SOC writing
+  style; the tool was silently missing real indicators in ordinary
+  text. Fixed with a refang step in `soc/iocs.py` before any pattern
+  runs, verified against the real API with the real defanged IP.
+- **Correlation escalation was gameable, and `alert_id` had no
+  uniqueness check.** The same real "suspicious" IP, posted under 5
+  different self-chosen `alert_id`s claiming a self-labeled
+  `"source":"attacker-controlled"`, escalated to `confirmed_threat`
+  every time after the first - free corroboration from one caller
+  repeating itself, not two independent detections. Separately, an
+  ordinary webhook retry (at-least-once delivery, the normal case) with
+  the identical `alert_id` silently created a second audit row. Fixed
+  the second problem for real: `alert_id` is now `UNIQUE`, and a
+  repeat is idempotent (returns the original record, verified live).
+  The first problem is **documented, not fully closed** - see the
+  "known trust boundary" note in `soc/triage.py::_correlate` - closing
+  it properly needs per-source authentication, which is a bigger change
+  than this project's single-shared-secret auth model currently
+  supports.
+- **No cap on IOCs looked up per alert, and the domain regex matched
+  plain filenames.** One alert with 10 real IPs fired 10 live
+  AbuseIPDB calls in 2.5 seconds with nothing stopping it from being
+  hundreds; separately, ordinary non-malicious text like
+  `"attached invoice.pdf, setup.exe"` was extracted as three domains
+  and burned VirusTotal's tight free-tier quota on nothing. Fixed both
+  in `soc/iocs.py`: a per-type cap, and a common-file-extension
+  exclusion on the domain pattern.
+- **The LLM narration prompt had no boundary around untrusted alert
+  text** (static analysis only - no `ANTHROPIC_API_KEY` configured, so
+  this wasn't confirmed against a live model). `llm_reasoning()`'s
+  prompt embedded `alert.raw_text` directly with no delimiter, the
+  documented mechanism behind a real paper on this exact attack class
+  against LLM-augmented SOC tools (arXiv 2605.24421). The verdict
+  itself was never at risk - `classify()` decides it before the LLM is
+  ever called, and nothing lets the LLM write back to it - but a
+  crafted alert could plausibly make the *narration* contradict the
+  verdict sitting right next to it, misleading a rushed reader. Fixed
+  with explicit delimiters and trust framing in the prompt, plus a
+  deterministic backstop (`_contradicts_verdict`) that rejects any
+  narration using dismissive language ("false positive", "benign") on
+  a `confirmed_threat` verdict and falls back to the template instead.
+- **`/docs` and `/openapi.json` ignored `SOC_API_KEY` entirely** - full
+  schema and an interactive Swagger UI stayed browsable with auth
+  "on" everywhere else. Fixed by disabling FastAPI's built-in doc
+  routes and re-serving the same content through three routes that use
+  the same `Authed` dependency as everything else.
+
+Confirmed safe, not just assumed: SQL injection against
+`store.list_records()`'s dynamic WHERE clause (parameterization held),
+CORS (no permissive defaults), and error responses (no leaked stack
+traces or paths).
+
 ## Running it as a service
 
 ```bash
@@ -251,7 +311,7 @@ actually found before it got to 10/10.
 ## Development
 
 ```bash
-.venv/Scripts/python -m pytest        # 65 tests, everything mocked, no keys/service needed
+.venv/Scripts/python -m pytest        # 82 tests, everything mocked, no keys/service needed
 .venv/Scripts/python -m ruff check alerts soc eval tests
 .venv/Scripts/python -m mypy alerts soc eval
 ```

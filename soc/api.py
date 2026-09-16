@@ -16,6 +16,9 @@ from typing import Annotated, Literal
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import HTMLResponse, JSONResponse
 from mcp_threat_intel.server import MissingApiKeyError
 from pydantic import BaseModel, Field
 
@@ -34,7 +37,33 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SOC Analyst", version="0.1.0", lifespan=lifespan)
+# docs_url/redoc_url/openapi_url=None disables FastAPI's built-in,
+# always-public doc routes - a red-team pass found the full API schema
+# and an interactive Swagger UI stayed browsable at /docs even with
+# SOC_API_KEY set, since those routes never went through require_api_key
+# at all. The three routes below serve the identical content back
+# through the same Authed dependency every other route uses, so "docs
+# open" tracks the same on/off switch as the rest of the API instead of
+# its own separate, forgotten one.
+app = FastAPI(
+    title="SOC Analyst", version="0.1.0", lifespan=lifespan,
+    docs_url=None, redoc_url=None, openapi_url=None,
+)
+
+
+@app.get("/openapi.json", include_in_schema=False)
+def openapi_schema(_auth: Authed) -> JSONResponse:
+    return JSONResponse(get_openapi(title=app.title, version=app.version, routes=app.routes))
+
+
+@app.get("/docs", include_in_schema=False)
+def swagger_docs(_auth: Authed) -> HTMLResponse:
+    return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} - Docs")
+
+
+@app.get("/redoc", include_in_schema=False)
+def redoc_docs(_auth: Authed) -> HTMLResponse:
+    return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 
 
 class AlertIn(BaseModel):
