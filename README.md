@@ -12,8 +12,10 @@ see "Why it never takes action" below for why that's not a missing
 feature.
 
 It's built on the other two things in this portfolio that already do
-the lookups: [mcp-threat-intel](../mcp-threat-intel) (AbuseIPDB,
-VirusTotal) and [mcp-cve-feed](../mcp-cve-feed) (the public NVD feed).
+the lookups: [mcp-threat-intel](../mcp-servers/mcp-threat-intel)
+(AbuseIPDB, VirusTotal) and [mcp-cve-feed](../mcp-servers/mcp-cve-feed)
+(the public NVD feed) - two of the three servers in the
+[mcp-servers](../mcp-servers) monorepo.
 Those two MCP servers' own tool functions are imported directly here -
 this project doesn't reimplement a third HTTP client for the same
 three APIs, it just calls the ones already built and tested.

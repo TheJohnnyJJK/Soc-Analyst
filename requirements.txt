@@ -3,5 +3,5 @@ pydantic>=2.7
 anthropic>=0.40
 python-dotenv>=1.0
 pytest>=8.0
--e ../mcp-threat-intel
--e ../mcp-cve-feed
+-e ../mcp-servers/mcp-threat-intel
+-e ../mcp-servers/mcp-cve-feed
