@@ -92,7 +92,7 @@ def test_triage_falls_back_to_heuristic_when_llm_call_fails(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "secret")
     monkeypatch.setattr(triage, "gather_evidence", lambda iocs: [_ev("ip", "1.2.3.4", "malicious")])
 
-    def boom(alert, evidence, verdict):
+    def boom(alert, evidence, verdict, correlation=None):
         raise RuntimeError("api unreachable")
 
     monkeypatch.setattr(triage, "llm_reasoning", boom)
@@ -101,5 +101,74 @@ def test_triage_falls_back_to_heuristic_when_llm_call_fails(monkeypatch):
     assert result.verdict == "confirmed_threat"
 
 
+def test_correlate_ignored_when_correlate_flag_is_false(monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("recent_sightings should not be called when correlate=False")
+
+    monkeypatch.setattr(triage.store, "recent_sightings", boom)
+    monkeypatch.setattr(triage, "gather_evidence", _suspicious_ip_evidence)
+    result = triage.triage(_alert(raw_text="contacted 1.2.3.4"))
+    assert result.verdict == "needs_review"
+    assert result.correlation is None
+
+
+def test_correlate_escalates_a_lone_suspicious_signal_on_a_repeat_sighting(monkeypatch):
+    monkeypatch.setattr(triage, "gather_evidence", _suspicious_ip_evidence)
+    monkeypatch.setattr(
+        triage.store,
+        "recent_sightings",
+        lambda ioc_type, value, hours, exclude_alert_id: [
+            {"alert_id": "other-alert", "verdict": "suspicious", "created_at": "x"}
+        ],
+    )
+    result = triage.triage(_alert(raw_text="contacted 1.2.3.4"), correlate=True)
+    assert result.verdict == "confirmed_threat"
+    assert result.correlation is not None
+    assert "other-alert" in result.correlation
+    assert result.confidence >= 0.75
+
+
+def test_correlate_does_nothing_without_a_repeat_sighting(monkeypatch):
+    monkeypatch.setattr(triage, "gather_evidence", _suspicious_ip_evidence)
+    monkeypatch.setattr(
+        triage.store,
+        "recent_sightings",
+        lambda ioc_type, value, hours, exclude_alert_id: [],
+    )
+    result = triage.triage(_alert(raw_text="contacted 1.2.3.4"), correlate=True)
+    assert result.verdict == "needs_review"
+    assert result.correlation is None
+
+
+def test_correlate_ignores_a_clean_prior_sighting(monkeypatch):
+    monkeypatch.setattr(triage, "gather_evidence", _suspicious_ip_evidence)
+    monkeypatch.setattr(
+        triage.store,
+        "recent_sightings",
+        lambda ioc_type, value, hours, exclude_alert_id: [
+            {"alert_id": "other-alert", "verdict": "clean", "created_at": "x"}
+        ],
+    )
+    result = triage.triage(_alert(raw_text="contacted 1.2.3.4"), correlate=True)
+    assert result.verdict == "needs_review"
+    assert result.correlation is None
+
+
+def test_correlate_does_not_apply_to_a_malicious_verdict(monkeypatch):
+    monkeypatch.setattr(triage, "gather_evidence", lambda iocs: [_ev("ip", "1.2.3.4", "malicious")])
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a malicious verdict has nothing to escalate to")
+
+    monkeypatch.setattr(triage.store, "recent_sightings", boom)
+    result = triage.triage(_alert(raw_text="contacted 1.2.3.4"), correlate=True)
+    assert result.verdict == "confirmed_threat"
+    assert result.correlation is None
+
+
 def _alert(raw_text: str = "contacted 1.2.3.4") -> Alert:
     return Alert(alert_id="t-01", source="test", raw_text=raw_text)
+
+
+def _suspicious_ip_evidence(iocs):
+    return [_ev("ip", "1.2.3.4", "suspicious")]

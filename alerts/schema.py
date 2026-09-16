@@ -21,6 +21,11 @@ EvidenceVerdict = Literal["malicious", "suspicious", "clean", "no_data"]
 # support a confident call either way (no IOCs to check, or IOCs no
 # threat-intel source has ever seen).
 Verdict = Literal["confirmed_threat", "likely_benign", "needs_review"]
+# What a human reviewer has done with a stored triage record - "open"
+# until someone acts on it. A record can only ever leave "open" once,
+# through soc/store.py::record_action() - see that module for why this
+# is the actual audit trail, not TriageResult itself.
+ActionStatus = Literal["open", "approved", "dismissed"]
 
 
 class Alert(BaseModel):
@@ -56,6 +61,27 @@ class TriageResult(BaseModel):
     evidence: list[Evidence]
     scorer: Literal["llm", "heuristic"]
     latency_ms: float
+    # Set only when store_path is passed to triage() and a prior sighting
+    # of one of this alert's IOCs was found - see soc/triage.py::_correlate.
+    # None (not "") means "correlation wasn't checked or found nothing",
+    # distinct from an empty string, which would wrongly imply it was
+    # checked and came back with literally nothing to say.
+    correlation: str | None = None
+
+
+class StoredTriageRecord(BaseModel):
+    """A TriageResult as persisted in the audit store, plus the alert it
+    came from and whatever a human has since done about it. This is the
+    actual compliance artifact this project produces - see soc/store.py."""
+
+    id: int
+    alert: Alert
+    result: TriageResult
+    status: ActionStatus
+    actioned_by: str | None = None
+    actioned_at: str | None = None
+    actioned_note: str | None = None
+    created_at: str
 
 
 class GoldenAlertCase(BaseModel):
