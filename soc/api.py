@@ -7,6 +7,7 @@ GET  /alerts               recent audit records, optionally filtered by verdict/
 GET  /alerts/{record_id}   one audit record
 POST /alerts/{record_id}/action   record a human decision (approve/dismiss) on one record
 GET  /health               liveness check, deliberately unauthenticated
+GET  /docs, /redoc, /openapi.json   interactive API docs, same auth as every other route
 """
 from __future__ import annotations
 
@@ -53,20 +54,29 @@ app = FastAPI(
 
 @app.get("/openapi.json", include_in_schema=False)
 def openapi_schema(_auth: Authed) -> JSONResponse:
+    """The same schema FastAPI would normally serve at this path for
+    free - regenerated on every request from `app.routes` rather than
+    cached, since this app is small enough that the cost is trivial."""
     return JSONResponse(get_openapi(title=app.title, version=app.version, routes=app.routes))
 
 
 @app.get("/docs", include_in_schema=False)
 def swagger_docs(_auth: Authed) -> HTMLResponse:
+    """Interactive Swagger UI, pointed at the /openapi.json route above
+    instead of FastAPI's default (now-disabled) /openapi.json."""
     return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} - Docs")
 
 
 @app.get("/redoc", include_in_schema=False)
 def redoc_docs(_auth: Authed) -> HTMLResponse:
+    """Same idea as swagger_docs() above, ReDoc's read-only alternative
+    to an interactive Swagger UI."""
     return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 
 
 class AlertIn(BaseModel):
+    """POST /alerts request body - a JSON-over-HTTP shape of alerts.schema.Alert."""
+
     # Optional: a real SIEM webhook may not supply a stable id of its own,
     # so one is generated (see create_alert()) rather than rejecting the
     # request.
@@ -77,6 +87,9 @@ class AlertIn(BaseModel):
 
 
 class ActionIn(BaseModel):
+    """POST /alerts/{id}/action request body - what a human decided
+    about one already-triaged alert."""
+
     status: Literal["approved", "dismissed"]
     actioned_by: str = Field(min_length=1, max_length=100)
     note: str | None = Field(default=None, max_length=1_000)
@@ -84,6 +97,9 @@ class ActionIn(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
+    """Liveness check - deliberately the one route with no Authed
+    dependency, so a load balancer/orchestrator health probe can hit
+    it without needing SOC_API_KEY."""
     return {"status": "ok"}
 
 
@@ -116,15 +132,20 @@ def create_alert(payload: AlertIn, _auth: Authed) -> StoredTriageRecord:
 @app.get("/alerts", response_model=list[StoredTriageRecord])
 def list_alerts(
     _auth: Authed,
+    # Capped at 500 rather than left open-ended, same reasoning as
+    # Lead Router's GET /leads: an unbounded limit lets any caller force
+    # a full-table-scan response by passing a huge number.
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     verdict: Verdict | None = None,
     status: Literal["open", "approved", "dismissed"] | None = None,
 ) -> list[StoredTriageRecord]:
+    """Most recent audit records first, optionally filtered."""
     return store.list_records(limit=limit, verdict=verdict, status=status)
 
 
 @app.get("/alerts/{record_id}", response_model=StoredTriageRecord)
 def get_alert(record_id: int, _auth: Authed) -> StoredTriageRecord:
+    """One audit record by its database id."""
     record = store.get_record(record_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"no record with id {record_id}")
@@ -133,6 +154,9 @@ def get_alert(record_id: int, _auth: Authed) -> StoredTriageRecord:
 
 @app.post("/alerts/{record_id}/action", response_model=StoredTriageRecord)
 def action_alert(record_id: int, payload: ActionIn, _auth: Authed) -> StoredTriageRecord:
+    """Records a human's approve/dismiss decision on one open record -
+    the other half of the audit trail beyond what the system itself
+    decided (see soc/store.py::record_action)."""
     if store.get_record(record_id) is None:
         raise HTTPException(status_code=404, detail=f"no record with id {record_id}")
     record = store.record_action(

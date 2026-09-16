@@ -48,11 +48,18 @@ _REFANG_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"hxxp", re.IGNORECASE), "http"),
 ]
 
+# Four dot-separated 0-255 octets - each octet group only matches
+# 250-255, 200-249, or 1-3 plain digits, so "999.999.999.999" can't
+# match even though a naive `\d{1,3}` version would.
 _IPV4 = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
+# One or more "label." groups followed by a final alphabetic label of
+# 2+ chars (the TLD) - e.g. "amaamn.com" or "sub.example.co.uk".
 _DOMAIN = re.compile(
     r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b"
 )
+# A run of exactly 64, 40, or 32 hex chars - SHA-256, SHA-1, or MD5.
 _HASH = re.compile(r"\b[a-fA-F0-9]{64}\b|\b[a-fA-F0-9]{40}\b|\b[a-fA-F0-9]{32}\b")
+# "CVE-" + a 4-digit year + a 4-or-more-digit sequence number.
 _CVE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
 
 # A domain-shaped token whose final label is actually a common file
@@ -72,6 +79,10 @@ _FILE_EXTENSIONS = {
 
 
 def _refang(text: str) -> str:
+    """Strips invisible zero-width characters and undoes the common
+    defanging conventions (see _REFANG_RULES above), so the regexes
+    below see "159.203.184.15" even when the alert text actually says
+    "159[.]203[.]184[.]15"."""
     text = _ZERO_WIDTH.sub("", text)
     for pattern, replacement in _REFANG_RULES:
         text = pattern.sub(replacement, text)
@@ -109,15 +120,24 @@ def extract_iocs(text: str) -> dict[IOCType, list[str]]:
 
 
 def _is_internal(ip: str) -> bool:
+    """True for anything in a private/loopback/link-local/reserved
+    range (10.x, 192.168.x, 127.x, 169.254.x, ...) - addresses no
+    public threat-intel source can meaningfully score."""
     addr = ipaddress.ip_address(ip)
     return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved
 
 
 def _cap(items: list[str]) -> list[str]:
+    """Truncates to the first _MAX_IOCS_PER_TYPE items - called on
+    every IOC type's final list in extract_iocs() so no single alert
+    can trigger an unbounded number of lookups."""
     return items[:_MAX_IOCS_PER_TYPE]
 
 
 def _dedupe(items) -> list[str]:
+    """De-duplicates while preserving first-seen order (a plain
+    `set(items)` would work but scrambles order, which matters for
+    tests that assert on the first match)."""
     seen: set[str] = set()
     result = []
     for item in items:

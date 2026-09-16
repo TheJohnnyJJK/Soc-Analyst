@@ -42,20 +42,24 @@ _CORRELATION_WINDOW_HOURS = 24.0
 
 
 def classify(evidence: list[Evidence]) -> tuple[Verdict, float]:
+    """Applies the five precedence rules from the module docstring, in
+    order, to one alert's gathered Evidence. Pure function, no I/O - the
+    same evidence list always produces the same (verdict, confidence)
+    pair, which is what makes the golden-set eval score reproducible."""
     if not evidence:
-        return "needs_review", 0.3
+        return "needs_review", 0.3  # rule 1: nothing was extracted to check
     verdicts = [e.verdict for e in evidence]
     malicious = verdicts.count("malicious")
-    if malicious:
+    if malicious:  # rule 2
         # More independent malicious signals = higher confidence a
         # correlated pattern is real, not a single source's false positive.
         confidence = min(0.7 + 0.1 * (malicious - 1), 0.95)
         return "confirmed_threat", confidence
-    if "no_data" in verdicts:
+    if "no_data" in verdicts:  # rule 3
         return "needs_review", 0.4
-    if "suspicious" in verdicts:
+    if "suspicious" in verdicts:  # rule 4 - _correlate() below can escalate this one further
         return "needs_review", 0.5
-    return "likely_benign", 0.8
+    return "likely_benign", 0.8  # rule 5: every piece of evidence came back clean
 
 
 def template_reasoning(
@@ -76,6 +80,11 @@ def template_reasoning(
 
 
 def _evidence_line(e: Evidence) -> str:
+    """One plain-English sentence per Evidence entry, shared by both
+    template_reasoning() and llm_reasoning() (the latter feeds these
+    lines to the model as its only source of facts) - CVEs get their
+    CVSS score quoted since "malicious"/"clean" alone would hide the
+    actual severity number a reader needs."""
     if e.verdict == "no_data":
         return f"{e.ioc_type} {e.value}: no data from {e.source_tool}."
     if e.ioc_type == "cve":
@@ -208,15 +217,26 @@ def _correlate(
 
 
 def triage(alert: Alert, correlate: bool = False) -> TriageResult:
+    """The full pipeline, end to end: extract IOCs -> gather evidence ->
+    classify -> (optionally) correlate against the audit store ->
+    narrate. Mirrors the 5 steps in the project README's "What it does
+    with each alert" section, in the same order."""
     started = time.perf_counter()
-    iocs = extract_iocs(alert.raw_text)
-    evidence = gather_evidence(iocs) if any(iocs.values()) else []
-    verdict, confidence = classify(evidence)
+    iocs = extract_iocs(alert.raw_text)  # step 1: extract
+    # Skip the network entirely when there's nothing to look up - an
+    # alert with zero IOCs shouldn't make any external calls at all.
+    evidence = gather_evidence(iocs) if any(iocs.values()) else []  # step 2: gather evidence
+    verdict, confidence = classify(evidence)  # step 3: classify
 
     correlation = None
-    if correlate:
+    if correlate:  # step 4: correlate
         verdict, confidence, correlation = _correlate(alert, evidence, verdict, confidence)
 
+    # step 5: narrate - try the LLM first (if configured), and treat
+    # ANY failure (a network error, a malformed response, or
+    # _contradicts_verdict() rejecting the output above) identically:
+    # fall back to the deterministic template rather than surface an
+    # error or show a reader an untrustworthy explanation.
     use_llm = bool(os.environ.get("ANTHROPIC_API_KEY"))
     try:
         reasoning = llm_reasoning(alert, evidence, verdict, correlation) if use_llm else None

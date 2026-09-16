@@ -15,6 +15,10 @@ _VERDICT_LABELS = {
 
 
 def render_report(alert: Alert, result: TriageResult) -> str:
+    """Builds the plain-text transcript section by section: the raw
+    alert, the verdict line, every piece of evidence by name, the
+    prose summary (result.reasoning - already includes any correlation
+    note, see soc/triage.py), and the fixed "no action taken" line."""
     lines = [
         f"=== Alert {alert.alert_id} ({alert.source}) ===",
         alert.raw_text,

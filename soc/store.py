@@ -1,10 +1,10 @@
 """SQLite audit trail - the actual product this project's research
-identified as what regulated buyers pay for. Every triage() call that
-passes a store_path gets one row here: the alert, the evidence, the
-verdict, and later, what a human did about it. Nothing is ever deleted
-or overwritten except the action fields (see record_action()) - a
-compliance examiner reading this table sees the same thing the system
-saw at decision time.
+identified as what regulated buyers pay for. Every alert POSTed to
+soc/api.py gets one row here via insert_triage(): the alert, the
+evidence, the verdict, and later, what a human did about it. Nothing
+is ever deleted or overwritten except the action fields (see
+record_action()) - a compliance examiner reading this table sees the
+same thing the system saw at decision time.
 
 Security note: every query uses `?` placeholders with values passed as
 a separate tuple, never string-formatted into the SQL - same rule and
@@ -66,6 +66,12 @@ CREATE INDEX IF NOT EXISTS idx_sightings_lookup ON ioc_sightings(ioc_type, value
 
 @contextmanager
 def _conn():
+    """One connection per call, opened and closed around a single unit
+    of work. Commits on the way out (after `yield` returns normally),
+    so every function below gets transactional behavior for free: an
+    exception raised inside the `with` block skips the commit, leaving
+    nothing partial written. row_factory=Row is what lets a fetched
+    row be read like a dict (row["verdict"]) in _row_to_record()."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
@@ -76,6 +82,10 @@ def _conn():
 
 
 def init_db() -> None:
+    """Creates both tables and their indexes if they don't already
+    exist - safe to call on every service startup (see soc/api.py's
+    `lifespan`), since CREATE TABLE/INDEX IF NOT EXISTS is a no-op on
+    a database that already has them."""
     with _conn() as conn:
         conn.executescript(SCHEMA)
 
@@ -142,6 +152,9 @@ def insert_triage(alert: Alert, result: TriageResult) -> int:
 
 
 def get_record_by_alert_id(alert_id: str) -> StoredTriageRecord | None:
+    """Looks a record up by its caller-chosen alert_id rather than the
+    database's own auto-incrementing id - what insert_triage() uses to
+    check for (and return) an existing record before writing a new one."""
     with _conn() as conn:
         row = conn.execute(
             "SELECT * FROM triage_records WHERE alert_id = ?", (alert_id,)
@@ -171,6 +184,7 @@ def recent_sightings(
 
 
 def get_record(record_id: int) -> StoredTriageRecord | None:
+    """Looks a record up by its database row id (GET /alerts/{id})."""
     with _conn() as conn:
         row = conn.execute(
             "SELECT * FROM triage_records WHERE id = ?", (record_id,)
@@ -220,6 +234,11 @@ def record_action(
 
 
 def _row_to_record(row: sqlite3.Row) -> StoredTriageRecord:
+    """Reassembles one flat database row back into the nested
+    Alert/TriageResult/StoredTriageRecord shape everything else in this
+    project works with - the inverse of how insert_triage() flattened
+    them going in (evidence_json in particular gets deserialized back
+    into a real list[Evidence])."""
     evidence = [Evidence(**e) for e in json.loads(row["evidence_json"])]
     alert = Alert(
         alert_id=row["alert_id"], source=row["source"],

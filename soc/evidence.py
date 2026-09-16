@@ -33,10 +33,11 @@ _CVE_SEVERITY_TO_VERDICT = {
 
 
 def gather_evidence(iocs: dict[IOCType, list[str]]) -> list[Evidence]:
-    """Looks up every extracted IOC and returns one Evidence per IOC.
-    A source that has never seen an indicator (VirusTotal 404s on an
-    unknown domain/hash) becomes verdict="no_data", not a crash and not
-    a silent "clean" - see _NOT_FOUND handling below."""
+    """Looks up every extracted IOC and returns one Evidence per IOC, in
+    the order ip -> domain -> hash -> cve. A source that has never seen
+    an indicator (VirusTotal 404s on an unknown domain/hash) becomes
+    verdict="no_data", not a crash and not a silent "clean" - see the
+    404 handling in _domain_evidence()/_hash_evidence() below."""
     evidence: list[Evidence] = []
     for ip in iocs.get("ip", []):
         evidence.append(_ip_evidence(ip))
@@ -50,6 +51,9 @@ def gather_evidence(iocs: dict[IOCType, list[str]]) -> list[Evidence]:
 
 
 def _ip_evidence(ip: str) -> Evidence:
+    # check_ip_reputation() is mcp-threat-intel's own MCP tool function -
+    # its return dict already includes a "verdict" key (clean/suspicious/
+    # malicious), computed there from AbuseIPDB's raw abuse_confidence_score.
     result = check_ip_reputation(ip)
     return Evidence(
         ioc_type="ip", value=ip, verdict=result["verdict"], source_tool="abuseipdb", detail=result
@@ -60,9 +64,13 @@ def _domain_evidence(domain: str) -> Evidence:
     try:
         result = check_domain_reputation(domain)
     except httpx.HTTPStatusError as exc:
+        # VirusTotal returns 404, not an empty/zero result, for a
+        # domain it has literally never indexed - that's "no_data",
+        # not "clean", so it's handled here rather than letting the
+        # exception propagate as a crash.
         if exc.response.status_code == 404:
             return _no_data("domain", domain, "virustotal")
-        raise
+        raise  # any other HTTP error (rate limit, auth, 5xx) is a real failure - let it surface
     return Evidence(
         ioc_type="domain",
         value=domain,
@@ -76,7 +84,7 @@ def _hash_evidence(file_hash: str) -> Evidence:
     try:
         result = check_file_hash(file_hash)
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 404:
+        if exc.response.status_code == 404:  # same "never indexed" case as _domain_evidence()
             return _no_data("hash", file_hash, "virustotal")
         raise
     return Evidence(
@@ -89,6 +97,9 @@ def _hash_evidence(file_hash: str) -> Evidence:
 
 
 def _cve_evidence(cve_id: str) -> Evidence:
+    # get_cve() returns None (not an HTTP error) for an ID the NVD API
+    # doesn't recognize - a plain miss, not a failure, so it maps to
+    # "no_data" the same way a VirusTotal 404 does above.
     result = get_cve(cve_id)
     if result is None:
         return _no_data("cve", cve_id, "nvd")
@@ -97,6 +108,9 @@ def _cve_evidence(cve_id: str) -> Evidence:
 
 
 def _no_data(ioc_type: IOCType, value: str, source_tool: str) -> Evidence:
+    """Shared builder for the "this source has never seen it" case -
+    used by every _*_evidence() helper above so the verdict/detail
+    shape is identical regardless of which IOC type or source hit it."""
     return Evidence(
         ioc_type=ioc_type,
         value=value,

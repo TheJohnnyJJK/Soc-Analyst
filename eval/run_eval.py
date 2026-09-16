@@ -26,6 +26,9 @@ _RESULTS_PATH = Path(__file__).resolve().parent / "results.json"
 
 
 def run() -> dict:
+    """Runs every golden case through triage() (correlate=False, so
+    this never touches the audit store - see soc/triage.py) and
+    returns the same summary dict that gets written to results.json."""
     cases = load_golden_alerts()
     records: list[dict[str, Any]] = []
     for case in cases:
@@ -65,6 +68,8 @@ def run() -> dict:
 
 
 def main() -> None:
+    """CLI entry point - runs the eval, prints the score, and lists
+    every miss with what was expected vs. what actually came back."""
     summary = run()
     print(f"{summary['passed']}/{summary['total']} correct ({summary['accuracy']:.1%})")
     print(f"avg latency: {summary['avg_latency_ms']:.0f}ms")

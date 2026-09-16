@@ -282,6 +282,7 @@ GET  /alerts                     recent audit records (filter by ?verdict= and/o
 GET  /alerts/{id}                one audit record
 POST /alerts/{id}/action         record a human decision: {"status": "approved"|"dismissed", "actioned_by": "...", "note": "..."}
 GET  /health                     liveness check, unauthenticated
+GET  /docs, /redoc, /openapi.json   interactive API docs - gated behind the same auth as everything else, not public by default the way FastAPI's are out of the box
 ```
 
 `SOC_API_KEY` is optional, same opt-in shared-secret pattern as Lead
@@ -304,9 +305,10 @@ never touches the audit store or the correlation feature - it's a pure
 grading run against `classify()`'s output, same as it was before the
 service existed.
 
-**Run for real with all three sources live: 10/10 correct, avg 439ms
-per alert.** See "Honesty notes" above for what the first live run
-actually found before it got to 10/10.
+**Run for real with all three sources live: 10/10 correct, avg latency
+in the 350-450ms/alert range across repeated runs.** See "Honesty
+notes" above for what the first live run actually found before it got
+to 10/10.
 
 ## Development
 
