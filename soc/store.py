@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS triage_records (
     actioned_by TEXT,
     actioned_at TEXT,
     actioned_note TEXT,
+    authenticated_source TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_triage_created_at ON triage_records(created_at);
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS ioc_sightings (
     ioc_type TEXT NOT NULL,
     value TEXT NOT NULL,
     verdict TEXT NOT NULL,
+    authenticated_source TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sightings_lookup ON ioc_sightings(ioc_type, value, created_at);
@@ -98,7 +100,9 @@ def reset_db() -> None:
     init_db()
 
 
-def insert_triage(alert: Alert, result: TriageResult) -> int:
+def insert_triage(
+    alert: Alert, result: TriageResult, authenticated_source: str | None = None
+) -> int:
     """Records one triage() call and its evidence, returns the row's id.
     Called from soc/api.py after triage() returns - never called
     directly by the eval harness, which stays a pure in-memory grading
@@ -110,6 +114,12 @@ def insert_triage(alert: Alert, result: TriageResult) -> int:
     audit trail and double-counting it as an "independent" correlation
     sighting. Retried with the same alert_id, this returns the existing
     record instead of writing a duplicate.
+
+    `authenticated_source` is the identity soc/security.py::identify_source
+    resolved from the caller's X-Source-Key (None if that feature isn't
+    configured) - stored alongside each sighting so recent_sightings()
+    can later tell "a different, authenticated reporter" from "a
+    different self-chosen alert_id from the same caller".
     """
     existing = get_record_by_alert_id(alert.alert_id)
     if existing is not None:
@@ -121,13 +131,13 @@ def insert_triage(alert: Alert, result: TriageResult) -> int:
                 """INSERT INTO triage_records
                    (alert_id, source, raw_text, reported_at, verdict, confidence,
                     reasoning, correlation, evidence_json, scorer, latency_ms,
-                    status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
+                    status, authenticated_source, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'open',?,?)""",
                 (
                     alert.alert_id, alert.source, alert.raw_text, alert.reported_at,
                     result.verdict, result.confidence, result.reasoning, result.correlation,
                     json.dumps([e.model_dump() for e in result.evidence]),
-                    result.scorer, result.latency_ms, created_at,
+                    result.scorer, result.latency_ms, authenticated_source, created_at,
                 ),
             )
         except sqlite3.IntegrityError:
@@ -140,9 +150,13 @@ def insert_triage(alert: Alert, result: TriageResult) -> int:
             for e in result.evidence:
                 conn.execute(
                     """INSERT INTO ioc_sightings
-                       (record_id, alert_id, ioc_type, value, verdict, created_at)
-                       VALUES (?,?,?,?,?,?)""",
-                    (record_id, alert.alert_id, e.ioc_type, e.value, e.verdict, created_at),
+                       (record_id, alert_id, ioc_type, value, verdict,
+                        authenticated_source, created_at)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (
+                        record_id, alert.alert_id, e.ioc_type, e.value, e.verdict,
+                        authenticated_source, created_at,
+                    ),
                 )
             return record_id
     winner = get_record_by_alert_id(alert.alert_id)
@@ -163,23 +177,40 @@ def get_record_by_alert_id(alert_id: str) -> StoredTriageRecord | None:
 
 
 def recent_sightings(
-    ioc_type: str, value: str, within_hours: float, exclude_alert_id: str
+    ioc_type: str,
+    value: str,
+    within_hours: float,
+    exclude_alert_id: str,
+    require_different_source: str | None = None,
 ) -> list[dict]:
     """Every prior sighting of this exact (ioc_type, value) pair, from a
     *different* alert, within the last `within_hours`. Excluding the
     current alert_id matters because a single alert can legitimately
     mention the same IOC more than once - that's not a cross-alert
-    pattern, it's the same sighting."""
+    pattern, it's the same sighting.
+
+    `require_different_source`, when given, is the calling alert's own
+    authenticated identity (see soc/security.py::identify_source): only
+    sightings recorded under a *different*, itself-authenticated
+    identity count, so a single caller can't manufacture "independent"
+    corroboration by posting several self-chosen alert_ids (the gap a
+    red-team pass documented in soc/triage.py::_correlate). Left at its
+    default of None - the caller wasn't authenticated as a source, e.g.
+    SOC_SOURCE_KEYS isn't configured - this falls back to the original,
+    alert_id-only check.
+    """
     cutoff = (
         datetime.datetime.utcnow() - datetime.timedelta(hours=within_hours)
     ).isoformat()
+    query = """SELECT DISTINCT alert_id, verdict, created_at FROM ioc_sightings
+               WHERE ioc_type = ? AND value = ? AND alert_id != ? AND created_at >= ?"""
+    params: list[object] = [ioc_type, value, exclude_alert_id, cutoff]
+    if require_different_source is not None:
+        query += " AND authenticated_source IS NOT NULL AND authenticated_source != ?"
+        params.append(require_different_source)
+    query += " ORDER BY created_at DESC"
     with _conn() as conn:
-        rows = conn.execute(
-            """SELECT DISTINCT alert_id, verdict, created_at FROM ioc_sightings
-               WHERE ioc_type = ? AND value = ? AND alert_id != ? AND created_at >= ?
-               ORDER BY created_at DESC""",
-            (ioc_type, value, exclude_alert_id, cutoff),
-        ).fetchall()
+        rows = conn.execute(query, params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -252,5 +283,6 @@ def _row_to_record(row: sqlite3.Row) -> StoredTriageRecord:
     return StoredTriageRecord(
         id=row["id"], alert=alert, result=result, status=row["status"],
         actioned_by=row["actioned_by"], actioned_at=row["actioned_at"],
-        actioned_note=row["actioned_note"], created_at=row["created_at"],
+        actioned_note=row["actioned_note"], authenticated_source=row["authenticated_source"],
+        created_at=row["created_at"],
     )

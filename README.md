@@ -153,6 +153,35 @@ first alert by id:
 > weak evidence alone, but this indicator recurring independently
 > across alerts is not.
 
+## Per-source authentication
+
+Cross-alert correlation is only meaningful if the second sighting is
+genuinely independent. Without this feature, "independent" is judged
+solely by `alert_id` - caller-chosen, so nothing stops one integration
+from posting the same suspicious IOC under several different
+self-chosen `alert_id`s and manufacturing its own corroboration.
+
+`SOC_SOURCE_KEYS` closes that: a JSON object mapping each upstream
+integration's own secret to a name -
+
+```
+SOC_SOURCE_KEYS={"k-for-edr":"edr-vendor","k-for-siem":"siem-vendor"}
+```
+
+- and each integration sends its key as `X-Source-Key` on every
+`POST /alerts`. `soc/security.py::identify_source` resolves that header
+to a name (401 if it's missing or doesn't match once this is
+configured), which is stored alongside the triage record and every IOC
+sighting it produced. `soc/triage.py::_correlate` then only escalates a
+lone "suspicious" signal when the repeat sighting it finds was recorded
+under a *different* authenticated name - one integration can no longer
+corroborate itself by varying its `alert_id`.
+
+This is opt-in, same shape as `SOC_API_KEY`: unset, every route behaves
+exactly as before, and correlation keeps using the documented,
+weaker alert_id-only model. It's independent of `SOC_API_KEY` too -
+one gates the whole API, the other only says who's calling.
+
 ## Why it never takes action
 
 `classify()` and `render_report()` only ever produce a recommendation.
@@ -222,11 +251,13 @@ fixed, each with a regression test, before this was called done:
   the identical `alert_id` silently created a second audit row. Fixed
   the second problem for real: `alert_id` is now `UNIQUE`, and a
   repeat is idempotent (returns the original record, verified live).
-  The first problem is **documented, not fully closed** - see the
-  "known trust boundary" note in `soc/triage.py::_correlate` - closing
-  it properly needs per-source authentication, which is a bigger change
-  than this project's single-shared-secret auth model currently
-  supports.
+  The first problem is now closed too, opt-in: `SOC_SOURCE_KEYS`
+  authenticates each upstream integration individually
+  (`soc/security.py::identify_source`), and `soc/triage.py::_correlate`
+  only escalates on a repeat sighting recorded under a *different*
+  authenticated source, not just a different self-chosen `alert_id` -
+  see "Per-source authentication" below. Unconfigured, the original
+  alert_id-only trust model still applies, documented as such.
 - **No cap on IOCs looked up per alert, and the domain regex matched
   plain filenames.** One alert with 10 real IPs fired 10 live
   AbuseIPDB calls in 2.5 seconds with nothing stopping it from being
@@ -313,7 +344,7 @@ to 10/10.
 ## Development
 
 ```bash
-.venv/Scripts/python -m pytest        # 82 tests, everything mocked, no keys/service needed
+.venv/Scripts/python -m pytest        # 91 tests, everything mocked, no keys/service needed
 .venv/Scripts/python -m ruff check alerts soc eval tests
 .venv/Scripts/python -m mypy alerts soc eval
 ```

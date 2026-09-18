@@ -106,6 +106,57 @@ def test_recent_sightings_respects_the_time_window():
     assert hits == []
 
 
+def test_insert_triage_stores_the_authenticated_source():
+    record_id = store.insert_triage(
+        _alert("a-01"), _result("a-01"), authenticated_source="edr-vendor"
+    )
+    record = store.get_record(record_id)
+    assert record is not None
+    assert record.authenticated_source == "edr-vendor"
+
+
+def test_insert_triage_authenticated_source_defaults_to_none():
+    record_id = store.insert_triage(_alert("a-01"), _result("a-01"))
+    record = store.get_record(record_id)
+    assert record is not None
+    assert record.authenticated_source is None
+
+
+def test_recent_sightings_require_different_source_excludes_the_same_source():
+    """The whole point of require_different_source: a caller can't
+    corroborate itself by posting under a new alert_id while
+    authenticated as the same source."""
+    store.insert_triage(_alert("a-01"), _result("a-01"), authenticated_source="edr-vendor")
+    hits = store.recent_sightings(
+        "ip", "1.2.3.4", within_hours=24, exclude_alert_id="a-02",
+        require_different_source="edr-vendor",
+    )
+    assert hits == []
+
+
+def test_recent_sightings_require_different_source_finds_a_genuinely_different_source():
+    store.insert_triage(_alert("a-01"), _result("a-01"), authenticated_source="edr-vendor")
+    hits = store.recent_sightings(
+        "ip", "1.2.3.4", within_hours=24, exclude_alert_id="a-02",
+        require_different_source="siem-vendor",
+    )
+    assert len(hits) == 1
+    assert hits[0]["alert_id"] == "a-01"
+
+
+def test_recent_sightings_require_different_source_excludes_an_unauthenticated_sighting():
+    """A prior sighting with no authenticated_source at all (recorded
+    before SOC_SOURCE_KEYS was configured, or from a caller that never
+    authenticated) can't corroborate an authenticated caller either -
+    "unauthenticated" isn't a source distinct from anything."""
+    store.insert_triage(_alert("a-01"), _result("a-01"))
+    hits = store.recent_sightings(
+        "ip", "1.2.3.4", within_hours=24, exclude_alert_id="a-02",
+        require_different_source="edr-vendor",
+    )
+    assert hits == []
+
+
 def test_insert_triage_is_idempotent_on_alert_id():
     first_id = store.insert_triage(_alert("a-01"), _result("a-01"))
     second_id = store.insert_triage(_alert("a-01"), _result("a-01"))

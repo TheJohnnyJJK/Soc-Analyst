@@ -15,6 +15,7 @@ from alerts.schema import Evidence
 def client(tmp_path, monkeypatch):
     db_path = tmp_path / "test_soc.db"
     monkeypatch.delenv("SOC_API_KEY", raising=False)
+    monkeypatch.delenv("SOC_SOURCE_KEYS", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     from soc import store
@@ -34,11 +35,13 @@ def client(tmp_path, monkeypatch):
         yield test_client
 
 
-def _post_alert(client, alert_id=None, raw_text="connection from 1.2.3.4", source="IDS"):
+def _post_alert(
+    client, alert_id=None, raw_text="connection from 1.2.3.4", source="IDS", headers=None
+):
     body = {"source": source, "raw_text": raw_text}
     if alert_id:
         body["alert_id"] = alert_id
-    return client.post("/alerts", json=body)
+    return client.post("/alerts", json=body, headers=headers)
 
 
 def test_health(client):
@@ -140,6 +143,71 @@ def test_repeat_sighting_escalates_via_the_real_http_flow(client, monkeypatch):
     second = _post_alert(client, alert_id="s-02", raw_text="connection from 5.6.7.8").json()
     assert second["result"]["verdict"] == "confirmed_threat"
     assert "s-01" in second["result"]["correlation"]
+
+
+def test_source_key_required_when_soc_source_keys_is_set(client, monkeypatch):
+    monkeypatch.setenv("SOC_SOURCE_KEYS", '{"key-a": "edr-vendor"}')
+    resp = _post_alert(client)
+    assert resp.status_code == 401
+
+    resp = _post_alert(client, headers={"X-Source-Key": "wrong"})
+    assert resp.status_code == 401
+
+    resp = _post_alert(client, headers={"X-Source-Key": "key-a"})
+    assert resp.status_code == 200
+
+
+def test_correlation_gaming_is_blocked_when_the_same_source_repeats_itself(client, monkeypatch):
+    """The gap a red-team pass documented: one caller posting the same
+    suspicious IOC under several self-chosen alert_ids used to
+    manufacture its own corroboration. With SOC_SOURCE_KEYS configured,
+    repeating under the same authenticated source no longer escalates."""
+    from soc import triage as triage_module
+
+    def suspicious_ip_evidence(iocs):
+        if not iocs.get("ip"):
+            return []
+        return [Evidence(ioc_type="ip", value="5.6.7.8", verdict="suspicious", source_tool="test")]
+
+    monkeypatch.setattr(triage_module, "gather_evidence", suspicious_ip_evidence)
+    monkeypatch.setenv("SOC_SOURCE_KEYS", '{"key-a": "edr-vendor"}')
+    headers = {"X-Source-Key": "key-a"}
+
+    first = _post_alert(
+        client, alert_id="g-01", raw_text="connection from 5.6.7.8", headers=headers
+    ).json()
+    assert first["result"]["verdict"] == "needs_review"
+
+    second = _post_alert(
+        client, alert_id="g-02", raw_text="connection from 5.6.7.8", headers=headers
+    ).json()
+    assert second["result"]["verdict"] == "needs_review"
+    assert second["result"]["correlation"] is None
+
+
+def test_correlation_still_escalates_across_two_distinct_authenticated_sources(client, monkeypatch):
+    from soc import triage as triage_module
+
+    def suspicious_ip_evidence(iocs):
+        if not iocs.get("ip"):
+            return []
+        return [Evidence(ioc_type="ip", value="5.6.7.8", verdict="suspicious", source_tool="test")]
+
+    monkeypatch.setattr(triage_module, "gather_evidence", suspicious_ip_evidence)
+    monkeypatch.setenv("SOC_SOURCE_KEYS", '{"key-a": "edr-vendor", "key-b": "siem-vendor"}')
+
+    first = _post_alert(
+        client, alert_id="d-01", raw_text="connection from 5.6.7.8",
+        headers={"X-Source-Key": "key-a"},
+    ).json()
+    assert first["result"]["verdict"] == "needs_review"
+
+    second = _post_alert(
+        client, alert_id="d-02", raw_text="connection from 5.6.7.8",
+        headers={"X-Source-Key": "key-b"},
+    ).json()
+    assert second["result"]["verdict"] == "confirmed_threat"
+    assert "d-01" in second["result"]["correlation"]
 
 
 def test_create_alert_returns_503_when_a_threat_intel_key_is_missing(client, monkeypatch):

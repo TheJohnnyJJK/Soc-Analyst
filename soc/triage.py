@@ -169,7 +169,11 @@ def _contradicts_verdict(reasoning: str, verdict: Verdict) -> bool:
 
 
 def _correlate(
-    alert: Alert, evidence: list[Evidence], verdict: Verdict, confidence: float
+    alert: Alert,
+    evidence: list[Evidence],
+    verdict: Verdict,
+    confidence: float,
+    authenticated_source: str | None = None,
 ) -> tuple[Verdict, float, str | None]:
     """A lone "suspicious" signal (classify() rule 4) is exactly the case
     a real analyst would escalate on seeing the same indicator show up in
@@ -179,17 +183,22 @@ def _correlate(
     confirmed_threat with nothing to escalate to, and "no IOCs"/"no_data"
     aren't reputation signals recurrence would corroborate.
 
-    Known trust boundary (a red-team pass confirmed this, not fixed
-    here): "independent" is judged only by alert_id/source, both
-    caller-supplied - insert_triage()'s alert_id uniqueness stops one
-    exact retry from double-counting, but nothing stops a single caller
-    from posting several *different* self-chosen alert_ids to
-    manufacture "independent" corroboration on demand. Closing that
-    fully needs per-source authentication (e.g. one API key per
-    upstream integration), not just a shared SOC_API_KEY - out of scope
-    for this project's current single-tenant auth model, but worth
-    knowing before trusting this signal from an untrusted ingestion
-    source.
+    Trust boundary (a red-team pass found this): "independent" can't
+    just mean alert_id/source, both caller-supplied - insert_triage()'s
+    alert_id uniqueness stops one exact retry from double-counting, but
+    nothing stops a single caller from posting several *different*
+    self-chosen alert_ids to manufacture "independent" corroboration on
+    demand. `authenticated_source` (soc/security.py::identify_source's
+    result, threaded through from soc/api.py) is what actually closes
+    this: when the calling alert authenticated as a specific source, a
+    prior sighting only counts if it was recorded under a *different*
+    authenticated source too (see store.recent_sightings's
+    require_different_source) - one caller repeating itself under new
+    alert_ids can no longer corroborate itself. Left at its default of
+    None (SOC_SOURCE_KEYS not configured, or this caller didn't
+    authenticate), correlation falls back to the original alert_id-only
+    check - a documented, weaker trust model for deployments that
+    haven't opted into per-source keys yet.
     """
     verdicts = {e.verdict for e in evidence}
     if verdict != "needs_review" or verdicts != {"suspicious"}:
@@ -200,7 +209,11 @@ def _correlate(
         if e.verdict != "suspicious":
             continue
         for sighting in store.recent_sightings(
-            e.ioc_type, e.value, _CORRELATION_WINDOW_HOURS, exclude_alert_id=alert.alert_id
+            e.ioc_type,
+            e.value,
+            _CORRELATION_WINDOW_HOURS,
+            exclude_alert_id=alert.alert_id,
+            require_different_source=authenticated_source,
         ):
             if sighting["verdict"] in ("suspicious", "malicious"):
                 hits.append(f"{e.ioc_type} {e.value} in {sighting['alert_id']}")
@@ -216,11 +229,21 @@ def _correlate(
     return "confirmed_threat", max(confidence, 0.75), note
 
 
-def triage(alert: Alert, correlate: bool = False) -> TriageResult:
+def triage(
+    alert: Alert, correlate: bool = False, authenticated_source: str | None = None
+) -> TriageResult:
     """The full pipeline, end to end: extract IOCs -> gather evidence ->
     classify -> (optionally) correlate against the audit store ->
     narrate. Mirrors the 5 steps in the project README's "What it does
-    with each alert" section, in the same order."""
+    with each alert" section, in the same order.
+
+    `authenticated_source` is soc/api.py's only caller passing the
+    identity soc/security.py::identify_source resolved for this
+    request, if any - forwarded to _correlate() so a repeat sighting
+    only escalates the verdict when it demonstrably came from a
+    different authenticated reporter. Neither the eval harness nor the
+    offline test suite pass this, so their correlation checks (already
+    correlate=False by default) are unaffected."""
     started = time.perf_counter()
     iocs = extract_iocs(alert.raw_text)  # step 1: extract
     # Skip the network entirely when there's nothing to look up - an
@@ -230,7 +253,9 @@ def triage(alert: Alert, correlate: bool = False) -> TriageResult:
 
     correlation = None
     if correlate:  # step 4: correlate
-        verdict, confidence, correlation = _correlate(alert, evidence, verdict, confidence)
+        verdict, confidence, correlation = _correlate(
+            alert, evidence, verdict, confidence, authenticated_source
+        )
 
     # step 5: narrate - try the LLM first (if configured), and treat
     # ANY failure (a network error, a malformed response, or

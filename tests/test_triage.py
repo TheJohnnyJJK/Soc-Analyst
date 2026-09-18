@@ -117,7 +117,7 @@ def test_correlate_escalates_a_lone_suspicious_signal_on_a_repeat_sighting(monke
     monkeypatch.setattr(
         triage.store,
         "recent_sightings",
-        lambda ioc_type, value, hours, exclude_alert_id: [
+        lambda ioc_type, value, hours, exclude_alert_id, require_different_source=None: [
             {"alert_id": "other-alert", "verdict": "suspicious", "created_at": "x"}
         ],
     )
@@ -133,7 +133,7 @@ def test_correlate_does_nothing_without_a_repeat_sighting(monkeypatch):
     monkeypatch.setattr(
         triage.store,
         "recent_sightings",
-        lambda ioc_type, value, hours, exclude_alert_id: [],
+        lambda ioc_type, value, hours, exclude_alert_id, require_different_source=None: [],
     )
     result = triage.triage(_alert(raw_text="contacted 1.2.3.4"), correlate=True)
     assert result.verdict == "needs_review"
@@ -145,13 +145,34 @@ def test_correlate_ignores_a_clean_prior_sighting(monkeypatch):
     monkeypatch.setattr(
         triage.store,
         "recent_sightings",
-        lambda ioc_type, value, hours, exclude_alert_id: [
+        lambda ioc_type, value, hours, exclude_alert_id, require_different_source=None: [
             {"alert_id": "other-alert", "verdict": "clean", "created_at": "x"}
         ],
     )
     result = triage.triage(_alert(raw_text="contacted 1.2.3.4"), correlate=True)
     assert result.verdict == "needs_review"
     assert result.correlation is None
+
+
+def test_correlate_forwards_the_authenticated_source_to_recent_sightings(monkeypatch):
+    """soc/api.py is the only real caller that ever has an authenticated
+    source identity to pass - this proves triage() actually threads it
+    through to the store query that enforces it, not just accepting the
+    parameter and dropping it."""
+    monkeypatch.setattr(triage, "gather_evidence", _suspicious_ip_evidence)
+    seen = {}
+
+    def fake_recent_sightings(
+        ioc_type, value, hours, exclude_alert_id, require_different_source=None
+    ):
+        seen["require_different_source"] = require_different_source
+        return []
+
+    monkeypatch.setattr(triage.store, "recent_sightings", fake_recent_sightings)
+    triage.triage(
+        _alert(raw_text="contacted 1.2.3.4"), correlate=True, authenticated_source="edr-vendor"
+    )
+    assert seen["require_different_source"] == "edr-vendor"
 
 
 def test_correlate_does_not_apply_to_a_malicious_verdict(monkeypatch):

@@ -113,6 +113,14 @@ class StoredTriageRecord(BaseModel):
     actioned_by: str | None = None
     actioned_at: str | None = None
     actioned_note: str | None = None
+    # The identity resolved from the caller's X-Source-Key (see
+    # soc/security.py::identify_source), or None when SOC_SOURCE_KEYS
+    # isn't configured or the caller didn't authenticate as a source.
+    # Distinct from `alert.source`, which is free text the caller
+    # chooses - this is only ever set by verifying a shared secret, which
+    # is what makes it safe for soc/triage.py::_correlate to trust as
+    # "an independent reporter", not just "a different string".
+    authenticated_source: str | None = None
     created_at: str
 
 

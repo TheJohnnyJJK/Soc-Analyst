@@ -26,10 +26,11 @@ from pydantic import BaseModel, Field
 from alerts.schema import Alert, StoredTriageRecord, Verdict
 
 from . import store
-from .security import require_api_key
+from .security import identify_source, require_api_key
 from .triage import triage
 
 Authed = Annotated[None, Depends(require_api_key)]
+SourceIdentity = Annotated[str | None, Depends(identify_source)]
 
 
 @asynccontextmanager
@@ -104,12 +105,20 @@ def health() -> dict:
 
 
 @app.post("/alerts", response_model=StoredTriageRecord)
-def create_alert(payload: AlertIn, _auth: Authed) -> StoredTriageRecord:
+def create_alert(
+    payload: AlertIn, _auth: Authed, source_identity: SourceIdentity
+) -> StoredTriageRecord:
     """Runs the real pipeline (extract -> gather evidence -> classify ->
     correlate against the audit store -> narrate) and persists the
     result - this is the one place correlate=True is ever passed, since
     it's also the one place that follows through and actually writes the
-    result the correlation check just read against."""
+    result the correlation check just read against.
+
+    `source_identity` is resolved from X-Source-Key by identify_source
+    (None unless SOC_SOURCE_KEYS is configured and the caller
+    authenticated) - passed to both triage() and insert_triage() so a
+    correlation check and the sighting it's checked against agree on who
+    reported it."""
     alert = Alert(
         alert_id=payload.alert_id or uuid.uuid4().hex[:12],
         source=payload.source,
@@ -117,12 +126,12 @@ def create_alert(payload: AlertIn, _auth: Authed) -> StoredTriageRecord:
         reported_at=payload.reported_at,
     )
     try:
-        result = triage(alert, correlate=True)
+        result = triage(alert, correlate=True, authenticated_source=source_identity)
     except MissingApiKeyError as exc:
         raise HTTPException(status_code=503, detail=f"threat-intel not configured: {exc}") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"threat-intel lookup failed: {exc}") from exc
-    record_id = store.insert_triage(alert, result)
+    record_id = store.insert_triage(alert, result, authenticated_source=source_identity)
     record = store.get_record(record_id)
     if record is None:  # pragma: no cover - insert_triage() just created this row
         raise HTTPException(status_code=500, detail="failed to read back the record just written")
